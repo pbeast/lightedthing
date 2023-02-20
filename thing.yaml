@@ -1,0 +1,270 @@
+esphome:
+  name: thing
+  on_boot:
+      priority: 600
+      then:
+        - lambda: |-
+            ESP_LOGI("main", "Initial mode index is %d", id(effect));
+            id(thing_mode).make_call().set_index(id(effect));
+            id(thing_mode).make_call().perform();
+            std::string states[] = {"Color", "Rainbow", "Color Wipe", "Fireworks"};
+            id(thing_mode).publish_state(states[id(effect)]);
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  password: "!111Zzzz"
+
+ota:
+  password: "!111Zzzz"
+
+wifi:
+  ssid: "PBeastNet"
+  password: "chuchundra"
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Thing Fallback Hotspot"
+    password: "!111Zzzz"
+
+captive_portal:
+
+globals:
+  - id: effect
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  - id: dim_up
+    type: boolean
+    restore_value: no
+    initial_value: 'false'
+
+light:
+  - platform: neopixelbus
+    variant: WS2812
+    pin: D4
+    num_leds: 5
+    name: "Thing Light"
+    id: thing_light
+    effects:
+      - addressable_rainbow:
+            name: "Rainbow"
+      - addressable_color_wipe:
+          name: "Color Wipe"
+      - addressable_fireworks:
+            name: "Fireworks"
+            use_random_color: true
+    on_turn_on:
+    - logger.log: "Light Turned On!"
+    - lambda:
+          auto call = id(thing_light).turn_on();
+          if (id(effect) == 1)  {
+            call.set_effect("Rainbow");
+          }
+          if (id(effect) == 2) {
+            call.set_effect("Color Wipe");
+          }
+          if (id(effect) == 3) {
+            call.set_effect("Fireworks");
+          }
+
+          call.perform();
+      
+binary_sensor:
+  - platform: gpio
+    pin: 
+      number: D1
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name:  "Thing Button"
+    id: thing_button
+    internal: true
+    filters:
+      - delayed_on: 5ms
+
+    on_multi_click:
+    - timing:
+        - ON for at most 1s
+        - OFF for at most 0.3s
+        - ON for at most 1s
+        - OFF for at least 0.2s
+      then:
+        - logger.log: "Double-Clicked"
+        - if:
+            condition:
+                light.is_off: thing_light
+            then:
+                - light.turn_on: 
+                    id: thing_light
+                    # brightness: 1
+                    # effect: "None"
+                - lambda: |-
+                    auto call = id(thing_light).turn_on();
+                    std::string effects[] = {"None", "Rainbow", "Color Wipe", "Fireworks"};
+                    call.set_effect(effects[id(effect)]);
+                    call.perform();
+
+                    std::string states[] = {"Color", "Rainbow", "Color Wipe", "Fireworks"};
+                    id(thing_mode).publish_state(states[id(effect)]);
+            else:            
+                - lambda:
+                    id(effect) += 1;
+                    if (id(effect) > 3)
+                      id(effect) = 0;
+
+                    auto call = id(thing_light).turn_on();
+                    std::string effects[] = {"None", "Rainbow", "Color Wipe", "Fireworks"};
+                    call.set_effect(effects[id(effect)]);
+                    call.perform();
+
+                    std::string states[] = {"Color", "Rainbow", "Color Wipe", "Fireworks"};
+                    id(thing_mode).publish_state(states[id(effect)]);
+    - timing:
+        - ON for at most 1s
+        - OFF for at least 0.5s
+      then:
+        - logger.log: "Single-Clicked"
+        - if:
+            condition:
+            - light.is_off: thing_light
+            then:
+            - logger.log: "Light is off. Turning on and restoring effect"
+            - lambda:
+                  auto call = id(thing_light).turn_on();
+                  std::string effects[] = {"None", "Rainbow", "Color Wipe", "Fireworks"};
+                  call.set_effect(effects[id(effect)]);
+                  call.perform();
+
+            else:
+            - logger.log: "Light is on. Turning off"
+            - light.turn_off: thing_light
+
+    on_press:
+          then:
+          - delay: 1.5s # Will interfere with clicks if no delay
+          - if:
+              condition: 
+              - binary_sensor.is_on: thing_button
+              then:
+              - logger.log: "Long Press Button"
+              - if:
+                  # When the light is off dim from low light and bring up
+                  condition:
+                  - light.is_off: thing_light
+                  then:
+                  - light.turn_on: 
+                      id: thing_light
+                      brightness: 0.1
+                      transition_length: 0.2s
+                  - lambda: |-
+                      id(dim_up) = true;
+                  # else:
+                  #   # Every time button pressed will change from dim up to dim down
+                  # - lambda: |-
+                  #     id(dim_up) = ! id(dim_up);
+          - while:
+              condition:
+              - binary_sensor.is_on: thing_button
+              then:
+              - if:
+                  condition: 
+                    lambda: |-
+                      if (id(thing_light).current_values.get_brightness() >= 1) {
+                        id(dim_up) = false;
+                      } else if (id(thing_light).current_values.get_brightness() <= 0.1) {
+                        id(dim_up) = true;
+                      } 
+                      return id(dim_up);
+                  then:
+                  - light.dim_relative:
+                      id: thing_light
+                      relative_brightness: 5%
+                      transition_length: 0.2s
+                  - delay: 0.2s                  
+                  else:
+                  - light.dim_relative:
+                      id: thing_light
+                      relative_brightness: -5%
+                      transition_length: 0.2s
+                  - delay: 0.2s 
+
+              - if:
+                  condition:
+                    lambda: |-
+                      return id(thing_light).current_values.get_brightness() >= 1;
+                  then:
+                  - logger.log: "Maximum brightness reached. Waiting 1 second" 
+                  - delay: 1s
+
+select:
+  - platform: template
+    name: "Thing Mode"
+    id: thing_mode
+    options:
+     - "Color"
+     - "Rainbow"
+     - "Color Wipe"
+     - "Fireworks"
+    optimistic: false
+    initial_option: "Color"
+    restore_value: true
+    # lambda:
+    #     - lambda: |-
+    #         ESP_LOGI("main", " -------- lambda called -------- ");
+    #         std::string states[] = {"Color", "Rainbow", "Color Wipe", "Fireworks"};
+    #         return states[id(effect)];
+    set_action:
+        - lambda: |-
+            ESP_LOGI("main", " -------- set_action called -------- ");
+            auto state = id(thing_mode).state.c_str();
+            ESP_LOGI("main", "State is %s", state);
+            ESP_LOGI("main", ">>>> %s", x.c_str());
+
+            std::string states[] = {"Color", "Rainbow", "Color Wipe", "Fireworks"};
+            std::string effects[] = {"None", "Rainbow", "Color Wipe", "Fireworks"};
+
+            auto index = id(thing_mode).index_of(x);
+            if (index.has_value()) {
+              ESP_LOGI("main", ">>>> New Index is %d", index.value());
+              if (index.value() != id(effect)) {
+                ESP_LOGI("main", "new effect index is different");
+                id(effect)= index.value();
+                auto call = id(thing_light).turn_on();
+                call.set_effect(effects[id(effect)]);
+                call.perform();
+              } 
+              else{
+                ESP_LOGI("main", "new effect index is the same as previous");
+
+                int tmp_idx = id(effect) == 0 ? 1 : 0;
+
+                id(thing_mode).make_call().set_option(states[tmp_idx]);
+                id(thing_mode).make_call().perform();
+                id(thing_mode).publish_state(states[tmp_idx]);
+
+                id(thing_mode).make_call().set_index(id(effect));
+                id(thing_mode).make_call().perform();
+              }
+
+              id(thing_mode).publish_state(states[id(effect)]);
+
+            } else {
+              ESP_LOGI("main", "No option is active");
+            }
+            
+            ESP_LOGI("main", "--------------------------------");
+    on_value:
+        - lambda: |-
+            ESP_LOGI("main", " -------- on_value called -------- ");
+            ESP_LOGI("main", "Value: %s", x.c_str());
+            
+            //id(thing_mode).publish_state(x);
+
+            ESP_LOGI("main", "---------------------------------------");
